@@ -1,16 +1,17 @@
 import base64, time, uuid
+import os
 from pathlib import Path
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 
-CONSUMER_ID = "ef7c1fec-1f3c-424e-843e-c25f0ee4289f"
+CONSUMER_ID = os.getenv("CONSUMER_ID")
+WALMART_SECRET = os.getenv("PRIVATE_KEY_PEM")
 KEY_VERSION = "1"
-PRIVATE_KEY_PEM = "/Users/muhammadmoiz/Documents/UoP/MSBA 286/retail_pricing/WM_IO_private_key.pem"
 
 def walmart_headers():
     ts = str(int(time.time()*1000))
     to_sign = f"{CONSUMER_ID}\n{ts}\n{KEY_VERSION}\n"
-    key = serialization.load_pem_private_key(Path(PRIVATE_KEY_PEM).read_bytes(), password=None)
+    key = serialization.load_pem_private_key(Path(WALMART_SECRET).read_bytes(), password=None)
     sig = key.sign(
         to_sign.encode("utf-8"),
         padding.PKCS1v15(),
