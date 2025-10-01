@@ -5,8 +5,8 @@ import pandas as pd
 
 # --- Extract (pull raw to Azure/raw or your Bronze table) ---
 # Keep your existing pull scripts as-is
-import pull_walmart   # your existing pull script module
-import pull_ebay      # your existing pull script module
+import n_walmart_pull   # your existing pull script module
+import n_ebay_pull      # your existing pull script module
 
 # --- Transform+Load (retailer → pre-silver → silver) ---
 from retailer_walmart import normalize_walmart
@@ -38,8 +38,8 @@ def to_silver(df_pre: pd.DataFrame) -> pd.DataFrame:
 
 def main():
     # 1) Pull raw snapshots (Extract)
-    pull_walmart.main()  # writes raw walmart snapshot to Azure
-    pull_ebay.main()     # writes raw ebay snapshot to Azure
+    n_walmart_pull.main()  # writes raw walmart snapshot to Azure
+    n_ebay_pull.main()     # writes raw ebay snapshot to Azure
 
     # 2) Read latest raw (or point to specific snapshot paths)
     df_wm_raw = read_raw_latest("walmart")   # implement helper to fetch latest raw
