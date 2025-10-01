@@ -1,4 +1,4 @@
-echo "pandas>=2.2
+"pandas>=2.2
 requests>=2.32
 azure-storage-blob>=12.20
 pyarrow>=16.1
