@@ -5,7 +5,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 
 CONSUMER_ID = os.getenv("CONSUMER_ID")
-WALMART_SECRET = os.getenv("PRIVATE_KEY_PEM")
+WALMART_SECRET = os.getenv("WALMART_SECRET")
 KEY_VERSION = os.getenv("KEY_VERSION")
 
 def walmart_headers():
