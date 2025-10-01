@@ -1,2 +1,35 @@
-.env
-.env
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+
+# Virtual environment
+.venv/
+env/
+venv/
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# IDE configs
+.vscode/
+.idea/
+
+# Data outputs
+data/
+out/
+raw/
+silver/
+*.csv
+*.parquet
+
+# Secrets
+*.env
+.env*
+config.json
+
+##added these files
