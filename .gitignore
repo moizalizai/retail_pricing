@@ -24,7 +24,6 @@ data/
 out/
 raw/
 silver/
-*.csv
 *.parquet
 
 # Secrets
