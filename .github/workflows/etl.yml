@@ -22,7 +22,7 @@ jobs:
       AZURE_STORAGE_CONNECTION_STRING: ${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}
       CONSUMER_ID: ${{ secrets.CONSUMER_ID }}
       KEY_VERSION: ${{ secrets.KEY_VERSION }}
-      WALMART_SECRET: ${{ secrets.PRIVATE_KEY_PEM }}
+      WALMART_SECRET: ${{ secrets.WALMART_SECRET }}
       EBAY_CLIENT_ID: ${{ secrets.EBAY_CLIENT_ID }}
       EBAY_CLIENT_SECRET: ${{ secrets.EBAY_CLIENT_SECRET }}
 
