@@ -1,6 +1,11 @@
 import uuid, datetime as dt
+import io, os, json
+from azure.storage.blob import BlobServiceClient
 import pandas as pd
 from typing import Optional, Tuple
+
+RAW_CONTAINER = os.getenv("RAW_CONTAINER", "retail-data")  
+RAW_PREFIX    = os.getenv("RAW_PREFIX", "raw") 
 
 SILVER_COLS = [
     "snapshot_date","captured_at","retailer_id","native_item_id","upc",
@@ -18,6 +23,74 @@ def _today_iso() -> str:
 
 def _now_utc_iso() -> str:
     return dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+
+def _blob_service() -> BlobServiceClient:
+    conn = os.environ["AZURE_STORAGE_CONNECTION_STRING"]
+    return BlobServiceClient.from_connection_string(conn)
+
+def _list_latest_blob(source: str):
+    """
+    Return (blob_name, kind) for the most recently modified blob under raw/{source}/.
+    kind ∈ {'jsonl','json','csv'} (guessed from extension). None if none found.
+    """
+    svc = _blob_service()
+    container = svc.get_container_client(RAW_CONTAINER)
+    prefix = f"{RAW_PREFIX}/{source}/"
+    latest = None  # (name, last_modified)
+    for b in container.list_blobs(name_starts_with=prefix):
+        if latest is None or b.last_modified > latest[1]:
+            latest = (b.name, b.last_modified)
+    if latest is None:
+        return None
+    name = latest[0]
+    if name.endswith(".jsonl"):
+        return name, "jsonl"
+    if name.endswith(".json"):
+        return name, "json"
+    return name, "csv"
+
+def _download_blob_text(blob_name: str) -> str:
+    svc = _blob_service()
+    container = svc.get_container_client(RAW_CONTAINER)
+    downloader = container.download_blob(blob_name)
+    return downloader.readall().decode("utf-8", errors="replace")
+
+def _df_from_jsonl(s: str) -> pd.DataFrame:
+    rows = [json.loads(line) for line in s.splitlines() if line.strip()]
+    return pd.json_normalize(rows) if rows else pd.DataFrame()
+
+def _df_from_json(s: str) -> pd.DataFrame:
+    obj = json.loads(s)
+    if isinstance(obj, list):
+        return pd.json_normalize(obj)
+    if isinstance(obj, dict):
+        for k in ("items", "data", "results"):
+            if k in obj and isinstance(obj[k], list):
+                return pd.json_normalize(obj[k])
+        return pd.json_normalize(obj)
+    return pd.DataFrame()
+
+def read_raw_latest(source: str) -> pd.DataFrame:
+    """
+    List blobs under raw/{source}/ in RAW_CONTAINER, pick the most recent,
+    download, parse to DataFrame. Adds snapshot metadata if missing.
+    """
+    found = _list_latest_blob(source)
+    if not found:
+        return pd.DataFrame()
+    name, kind = found
+    text = _download_blob_text(name)
+    if kind == "jsonl":
+        df = _df_from_jsonl(text)
+    elif kind == "json":
+        df = _df_from_json(text)
+    else:
+        df = pd.read_csv(io.StringIO(text))
+    if "snapshot_date" not in df.columns:
+        df["snapshot_date"] = _today_iso()
+    if "captured_at" not in df.columns:
+        df["captured_at"] = _now_utc_iso()
+    return df
 
 def _to_float(x) -> Optional[float]:
     try:

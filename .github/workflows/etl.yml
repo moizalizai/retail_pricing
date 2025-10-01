@@ -20,6 +20,8 @@ jobs:
     env:
       # Secrets set in: Repo → Settings → Secrets and variables → Actions
       AZURE_STORAGE_CONNECTION_STRING: ${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}
+      RAW_CONTAINER: retail-data
+      RAW_PREFIX: raw
       CONSUMER_ID: ${{ secrets.CONSUMER_ID }}
       KEY_VERSION: ${{ secrets.KEY_VERSION }}
       WALMART_SECRET: ${{ secrets.WALMART_SECRET }}
