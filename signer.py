@@ -6,7 +6,7 @@ from cryptography.hazmat.primitives.asymmetric import padding
 
 CONSUMER_ID = os.getenv("CONSUMER_ID")
 WALMART_SECRET = os.getenv("PRIVATE_KEY_PEM")
-KEY_VERSION = "1"
+KEY_VERSION = os.getenv("KEY_VERSION")
 
 def walmart_headers():
     ts = str(int(time.time()*1000))

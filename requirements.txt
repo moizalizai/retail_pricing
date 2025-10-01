@@ -1,0 +1,7 @@
+echo "pandas>=2.2
+requests>=2.32
+azure-storage-blob>=12.20
+pyarrow>=16.1
+python-dateutil>=2.9
+tenacity>=9.0
+python-dotenv>=1.0" > requirements.txt

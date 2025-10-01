@@ -20,9 +20,9 @@ jobs:
     env:
       # Secrets set in: Repo → Settings → Secrets and variables → Actions
       AZURE_STORAGE_CONNECTION_STRING: ${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}
-      WALMART_CONSUMER_ID: ${{ secrets.WALMART_CONSUMER_ID }}
-      WALMART_KEY: ${{ secrets.WALMART_KEY }}
-      WALMART_SECRET: ${{ secrets.WALMART_SECRET }}
+      CONSUMER_ID: ${{ secrets.CONSUMER_ID }}
+      WALMART_KEY: ${{ secrets.KEY_VERSION }}
+      WALMART_SECRET: ${{ secrets.PRIVATE_KEY_PEM }}
       EBAY_CLIENT_ID: ${{ secrets.EBAY_CLIENT_ID }}
       EBAY_CLIENT_SECRET: ${{ secrets.EBAY_CLIENT_SECRET }}
 
@@ -48,7 +48,7 @@ jobs:
           import os, sys
           for k in [
             "AZURE_STORAGE_CONNECTION_STRING",
-            "WALMART_CONSUMER_ID","WALMART_KEY","WALMART_SECRET",
+            "CONSUMER_ID","KEY_VERSION","WALMART_SECRET",
             "EBAY_CLIENT_ID","EBAY_CLIENT_SECRET"
           ]:
               if not os.getenv(k):
