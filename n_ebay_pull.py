@@ -277,7 +277,7 @@ def main():
             df[c] = None
     df = df[cols]
 
-    write_snapshot(df)
+    write_snapshot_ebay(df)
 
 
 if __name__ == "__main__":
