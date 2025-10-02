@@ -62,15 +62,18 @@ def _get_ebay_access_token() -> str:
         sys.exit(1)
 
     basic = base64.b64encode(f"{EBAY_CLIENT_ID}:{EBAY_CLIENT_SECRET}".encode()).decode()
-    headers = {"Authorization": f"Basic {basic}", "Content-Type": "application/x-www-form-urlencoded"}
-    scopes = " ".join([
-        "https://api.ebay.com/oauth/api_scope",
-        "https://api.ebay.com/oauth/api_scope/buy.item.readonly",
-    ])
-    data = {"grant_type": "client_credentials", "scope": scopes}
-    r = requests.post(EBAY_TOKEN_URL, headers=headers, data=data, timeout=20)
+    headers = {
+        "Authorization": f"Basic {basic}",
+        "Content-Type": "application/x-www-form-urlencoded",
+    }
+    # IMPORTANT: Application access token for Browse = base scope ONLY
+    data = {
+        "grant_type": "client_credentials",
+        "scope": "https://api.ebay.com/oauth/api_scope",
+    }
+    r = requests.post(EBAY_TOKEN_URL, headers=headers, data=data, timeout=30)
     if r.status_code != 200:
-        print(f"[ERROR] eBay token failed {r.status_code}: {r.text[:200]}", file=sys.stderr)
+        print(f"[ERROR] eBay token failed {r.status_code}: {r.text[:300]}", file=sys.stderr)
         sys.exit(1)
     tok = r.json()
     _cached_token = tok["access_token"]
@@ -81,8 +84,62 @@ def ebay_headers() -> dict:
     return {
         "Authorization": f"Bearer {_get_ebay_access_token()}",
         "Content-Type": "application/json",
-        "X-EBAY-C-MARKETPLACE-ID": EBAY_MARKETPLACE_ID,
+        "X-EBAY-C-MARKETPLACE-ID": EBAY_MARKETPLACE_ID,  # e.g. EBAY_US
     }
+
+# Search endpoint (prod/sandbox aware)
+EBAY_SEARCH_URL = f"https://{_browse_host()}/buy/browse/v1/item_summary/search"
+
+def search_by_gtin(upcs, per_upc_limit=10):
+    """
+    Look up eBay items by GTIN (UPC/EAN). Returns a list of dicts with ebay_item_id, url, etc.
+    Requires only the base scope: https://api.ebay.com/oauth/api_scope
+    """
+    out = []
+    hdrs = ebay_headers()  # uses your token + X-EBAY-C-MARKETPLACE-ID
+    for upc in upcs:
+        params = {"gtin": upc, "limit": per_upc_limit}
+        try:
+            r = requests.get(EBAY_SEARCH_URL, headers=hdrs, params=params, timeout=20)
+            if r.status_code == 200:
+                js = r.json() or {}
+                for it in js.get("itemSummaries", []):
+                    out.append({
+                        "upc": upc,
+                        "ebay_item_id": it.get("itemId"),
+                        "viewItemURL": it.get("itemWebUrl") or it.get("itemHref"),
+                        "title": it.get("title"),
+                        "price": (it.get("price") or {}).get("value"),
+                        "currency": (it.get("price") or {}).get("currency"),
+                    })
+            elif r.status_code in (429, 500, 502, 503, 504):
+                time.sleep(1.0)
+                r2 = requests.get(EBAY_SEARCH_URL, headers=hdrs, params=params, timeout=20)
+                if r2.status_code == 200:
+                    js = r2.json() or {}
+                    for it in js.get("itemSummaries", []):
+                        out.append({
+                            "upc": upc,
+                            "ebay_item_id": it.get("itemId"),
+                            "viewItemURL": it.get("itemWebUrl") or it.get("itemHref"),
+                            "title": it.get("title"),
+                            "price": (it.get("price") or {}).get("value"),
+                            "currency": (it.get("price") or {}).get("currency"),
+                        })
+            else:
+                print(f"[WARN] search UPC {upc} -> {r.status_code}: {r.text[:160]}")
+        except requests.RequestException as e:
+            print(f"[ERROR] GTIN search error for {upc}: {e}")
+        time.sleep(RATE_SLEEP)
+
+    # de-dupe by ebay_item_id
+    dedup = {}
+    for row in out:
+        eid = row.get("ebay_item_id")
+        if eid and eid not in dedup:
+            dedup[eid] = row
+    return list(dedup.values())
+
 
 # -----------------------
 # Load seed IDs (from your mapping)
@@ -190,34 +247,47 @@ def write_snapshot_ebay(df: pd.DataFrame, ingest_run_id: str | None = None) -> s
     return blob_path
 
 def run_pull_and_write_raw(ingest_run_id: str | None = None) -> str:
-    """
-    Pull eBay details for the IDs in ebay_matches.csv and write a RAW snapshot.
-    Returns the blob path that was written.
-    """
-    # 1) Load seed IDs from your mapping (NOT master_skus)
-    matches = load_ebay_matches("ebay_matches.csv")  # uses ebay_item_id / itemId
-    ids = matches["ebay_item_id"].dropna().astype(str).unique().tolist()
-    if not ids:
-        raise RuntimeError("eBay: no ebay_item_id values found in ebay_matches.csv")
+    # Prefer explicit matches file
+    ids = []
+    try:
+        matches = load_ebay_matches("ebay_matches.csv")
+        ids = matches["ebay_item_id"].dropna().astype(str).unique().tolist()
+    except SystemExit:
+        pass  # no file; we’ll fallback
+    except Exception as e:
+        print(f"[WARN] could not load ebay_matches.csv: {e}")
 
-    # 2) Call eBay Browse details API in chunks
+    # Fallback to GTIN search from master_skus.csv
+    if not ids:
+        if not pathlib.Path("master_skus.csv").exists():
+            raise RuntimeError("No ebay_matches.csv and no master_skus.csv to search by GTIN")
+        master = pd.read_csv("master_skus.csv")
+        upcs = master.get("upc", pd.Series([], dtype=str)).dropna().astype(str).unique().tolist()
+        if not upcs:
+            raise RuntimeError("No UPCs found to search on")
+        print(f"[INFO] Searching eBay by GTIN for {len(upcs)} UPCs...")
+        found = search_by_gtin(upcs, per_upc_limit=5)
+        if not found:
+            raise RuntimeError("GTIN search returned no items")
+        # Optional: persist a fresh mapping for next runs
+        pd.DataFrame(found)[["upc","ebay_item_id","viewItemURL"]].to_csv("ebay_matches.csv", index=False)
+        ids = [r["ebay_item_id"] for r in found if r.get("ebay_item_id")]
+
+    # Pull full item details by id
     rows = []
-    for chunk in chunked(ids, BATCH_SIZE):           # BATCH_SIZE already defined (e.g., 20)
-        items = request_items_by_id(chunk)           # your eBay GET /buy/browse/v1/item/{id}
+    for chunk in chunked(ids, BATCH_SIZE):
+        items = request_items_by_id(chunk)
         for it in items:
             try:
-                rows.append(parse_ebay_item(it))     # normalize raw fields for RAW
+                rows.append(parse_ebay_item(it))
             except Exception as e:
-                print(f"[WARN] parse error: {e}", file=sys.stderr)
-
-        time.sleep(RATE_SLEEP)                       # be polite to the API
+                print(f"[WARN] parse error: {e}")
 
     if not rows:
-        raise RuntimeError("eBay: no rows parsed from API; check creds/env/endpoints")
-
-    # 3) Stamp & WRITE RAW to Azure (retailer_id='ebay') and return the blob path
+        raise RuntimeError("eBay: no rows parsed from details API")
     df = pd.DataFrame(rows)
     return write_snapshot_ebay(df, ingest_run_id=ingest_run_id)
+
 
 
 # -----------------------
