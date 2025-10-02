@@ -32,6 +32,13 @@ from silver_utils import (
     upsert_to_silver,
 )
 
+import n_walmart_pull as wm   # <-- add this
+import n_ebay_pull as eb      # <-- and this
+
+from silver_utils import read_raw_latest, upsert_to_silver
+from retailer_walmart import normalize_walmart
+from retailer_ebay import normalize_ebay
+
 def make_ingest_run_id() -> str:
     """Works in GitHub Actions and locally."""
     rid = os.getenv("GITHUB_RUN_ID") or os.getenv("RUN_ID")
