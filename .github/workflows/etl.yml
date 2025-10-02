@@ -1,13 +1,16 @@
 name: Retail Pricing ETL
 
 on:
+  workflow_dispatch:
   schedule:
-    # Every 12 hours (UTC): 00:00 and 12:00 UTC
     - cron: "0 */12 * * *"
-  workflow_dispatch: {}  # allow manual runs
 
 permissions:
   contents: read
+
+concurrency:
+  group: retail-etl-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   etl:
