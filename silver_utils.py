@@ -177,6 +177,21 @@ def _landed(price_current: Optional[float], shipping_cost: Optional[float]) -> O
     return price_current + (shipping_cost or 0.0)
 
 # ----------------
+# Column coalescing
+# ----------------
+def coalesce_cols(df: pd.DataFrame, cols: list, dtype: str = "string") -> pd.Series:
+    """
+    First-non-null across given columns.
+    Keeps only existing columns; if none exist, returns NA series of correct length.
+    """
+    use = [c for c in cols if c in df.columns]
+    if not use:
+        return pd.Series(pd.NA, index=df.index, dtype=dtype)
+    out = df[use].bfill(axis=1).iloc[:, 0]
+    out = out.replace(r"^\s*$", pd.NA, regex=True).astype(dtype)
+    return out
+
+# ----------------
 # Normalization & schema
 # ----------------
 def standardize_brand_title(df: pd.DataFrame) -> pd.DataFrame:
@@ -189,7 +204,6 @@ def standardize_brand_title(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     if "brand_raw" in df.columns:
         df["brand_raw"] = df["brand_raw"].astype(str).str.strip()
-        # keep original casing but collapse whitespace
         df["brand_raw"] = df["brand_raw"].str.replace(r"\s+", " ", regex=True)
     if "title_raw" in df.columns:
         df["title_raw"] = df["title_raw"].astype(str).str.strip()
@@ -227,7 +241,6 @@ def normalize_currency(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     if "currency" in df.columns:
         cur = df["currency"].astype(str).str.strip()
-        # map symbols when column has symbol-like entries
         df["currency"] = cur.map(lambda x: symbol_to_code.get(x, x)).str.upper()
     else:
         df["currency"] = None
@@ -383,7 +396,6 @@ def make_silver_keys(df: pd.DataFrame) -> pd.DataFrame:
             return str(uuid.uuid4())
         df.loc[mask_missing, "native_item_id"] = df[mask_missing].apply(_derive, axis=1)
 
-    # Make sure as string
     df["native_item_id"] = df["native_item_id"].astype(str)
     return df
 
@@ -398,7 +410,6 @@ def _finalize(df: pd.DataFrame, retailer_id: str, source_endpoint: str, ingest_r
     df["source_endpoint"] = source_endpoint
     df["ingest_run_id"]   = ingest_run_id
     df["ingest_status"]   = df.get("ingest_status", "ok")
-    # Ensure all columns exist and order them
     for c in SILVER_COLS:
         if c not in df.columns:
             df[c] = None
@@ -414,19 +425,16 @@ def _merge_dedupe(existing: pd.DataFrame, incoming: pd.DataFrame, key_cols: List
     else:
         base = pd.concat([existing, incoming], ignore_index=True)
 
-    # Coerce captured_at to sortable timestamp
     if "captured_at" in base.columns:
         ts = pd.to_datetime(base["captured_at"], errors="coerce")
         base["_ts"] = ts
     else:
         base["_ts"] = pd.Timestamp.utcnow()
 
-    # Sort and drop duplicates keeping the newest record per key
     base = base.sort_values(by=["_ts"], ascending=True)
     base = base.drop(columns=["_ts"])
     base = base.drop_duplicates(subset=key_cols, keep="last")
 
-    # Return in canonical order
     cols = [c for c in SILVER_COLS if c in base.columns] + [c for c in base.columns if c not in SILVER_COLS]
     return base[cols]
 
@@ -436,8 +444,8 @@ def upsert_to_silver(
     source_endpoint: str,
     ingest_run_id: str,
     key_cols: Optional[List[str]] = None,
-    table: Optional[str] = None,   # <— NEW
-    **kwargs                       # <— swallow any extra named args safely
+    table: Optional[str] = None,
+    **kwargs
 ) -> List[str]:
     """
     Upsert `df` into silver storage (Azure Blob), partitioned by snapshot_date and retailer_id.
@@ -446,10 +454,13 @@ def upsert_to_silver(
       - {SILVER_PREFIX}/{<table or retailer_id>}/snapshot_date=YYYY-MM-DD/run_<ingest_run_id>.csv
       - {SILVER_PREFIX}/{<table or retailer_id>}/snapshot_date=YYYY-MM-DD/current.csv
     """
+    # Accept alias: keys=...
+    if key_cols is None and "keys" in kwargs and kwargs["keys"] is not None:
+        key_cols = list(kwargs["keys"])
+
     if key_cols is None:
         key_cols = ["retailer_id", "native_item_id"]
     else:
-        # accept tuple or list
         key_cols = list(key_cols)
 
     if df is None or len(df) == 0:
@@ -465,7 +476,6 @@ def upsert_to_silver(
     df = make_silver_keys(df)
     df = _finalize(df, retailer_id=retailer_id, source_endpoint=source_endpoint, ingest_run_id=ingest_run_id)
 
-    # choose a namespace in the path
     ns = table if (table and str(table).strip()) else retailer_id
 
     written: List[str] = []
@@ -490,7 +500,6 @@ def upsert_to_silver(
 
     return written
 
-
 # ----------------
 # Public exports
 # ----------------
@@ -509,5 +518,10 @@ __all__ = [
     "upsert_to_silver",
     # constants/schema
     "SILVER_COLS",
+    # utilities
+    "coalesce_cols",
+    # private used by call sites (optional export if you import it elsewhere)
+    "_finalize",
 ]
+
 
