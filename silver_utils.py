@@ -436,23 +436,26 @@ def upsert_to_silver(
     source_endpoint: str,
     ingest_run_id: str,
     key_cols: Optional[List[str]] = None,
+    table: Optional[str] = None,   # <— NEW
+    **kwargs                       # <— swallow any extra named args safely
 ) -> List[str]:
     """
-    Upsert `df` into silver storage (Azure Blob) partitioned by `snapshot_date` and `retailer_id`.
+    Upsert `df` into silver storage (Azure Blob), partitioned by snapshot_date and retailer_id.
 
     Writes:
-      - silver/{retailer_id}/snapshot_date=YYYY-MM-DD/run_{ingest_run_id}.csv   (audit)
-      - silver/{retailer_id}/snapshot_date=YYYY-MM-DD/current.csv              (merged)
-
-    Returns a list of blob names written.
+      - {SILVER_PREFIX}/{<table or retailer_id>}/snapshot_date=YYYY-MM-DD/run_<ingest_run_id>.csv
+      - {SILVER_PREFIX}/{<table or retailer_id>}/snapshot_date=YYYY-MM-DD/current.csv
     """
     if key_cols is None:
-        key_cols = ["retailer_id","native_item_id"]
+        key_cols = ["retailer_id", "native_item_id"]
+    else:
+        # accept tuple or list
+        key_cols = list(key_cols)
 
     if df is None or len(df) == 0:
         return []
 
-    # Basic pipeline: tidy → compute → validate → keys → finalize
+    # Pipeline
     df = standardize_brand_title(df)
     df = map_categories(df)
     df = normalize_currency(df)
@@ -462,19 +465,19 @@ def upsert_to_silver(
     df = make_silver_keys(df)
     df = _finalize(df, retailer_id=retailer_id, source_endpoint=source_endpoint, ingest_run_id=ingest_run_id)
 
+    # choose a namespace in the path
+    ns = table if (table and str(table).strip()) else retailer_id
+
     written: List[str] = []
-    # May contain multiple snapshot_dates; upsert each partition separately
     for snap_date, part in df.groupby("snapshot_date", dropna=False):
         snap = str(snap_date) if pd.notna(snap_date) else _today_iso()
-        base_path = f"{SILVER_PREFIX}/{retailer_id}/snapshot_date={snap}"
-        run_blob   = f"{base_path}/run_{ingest_run_id}.csv"
-        current_blob = f"{base_path}/current.csv"
+        base_path     = f"{SILVER_PREFIX}/{ns}/snapshot_date={snap}"
+        run_blob      = f"{base_path}/run_{ingest_run_id}.csv"
+        current_blob  = f"{base_path}/current.csv"
 
-        # Write audit/run file
         _upload_blob_text(SILVER_CONTAINER, run_blob, part.to_csv(index=False))
         written.append(run_blob)
 
-        # Merge with existing current.csv if present
         if _blob_exists(SILVER_CONTAINER, current_blob):
             old_text = _download_blob_text(SILVER_CONTAINER, current_blob)
             existing = pd.read_csv(io.StringIO(old_text))
@@ -486,6 +489,7 @@ def upsert_to_silver(
         written.append(current_blob)
 
     return written
+
 
 # ----------------
 # Public exports
