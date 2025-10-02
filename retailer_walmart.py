@@ -64,3 +64,22 @@ def _derive_stock(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     # If in_stock_flag missing/empty, derive from availability_message heuristics
     need = "in_stock_flag" not in df.columns or df["in_stock_flag"].isna().all()
+    if need and "availability_message" in df.columns:
+        def _mk(v):
+            if v is None or (isinstance(v, float) and pd.isna(v)):
+                return None
+            t = str(v).strip().lower()
+            if t.startswith("avail"):  # "Available", "Available Online"
+                return True
+            if t.startswith("out"):    # "Out of stock"
+                return False
+            return None
+        df["in_stock_flag"] = df["availability_message"].map(_mk)
+    return df
+
+def normalize_walmart(df_raw: pd.DataFrame) -> pd.DataFrame:
+    """
+    Map Walmart raw columns into silver contract names.
+    Returns a pre-silver DataFrame; downstream silver pipeline will coerce types,
+    compute promo/landed, validate, and finalize.
+    """
