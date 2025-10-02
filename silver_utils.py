@@ -373,24 +373,23 @@ def validate_schema(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def make_silver_keys(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Ensure `native_item_id` exists. If missing/blank, derive a stable UUID5 from product_url or title+brand.
-    """
-    if df is None or len(df) == 0:
-        return pd.DataFrame(columns=SILVER_COLS)
-
     df = df.copy()
     if "native_item_id" not in df.columns:
         df["native_item_id"] = None
 
-    mask_missing = df["native_item_id"].isna() | (df["native_item_id"].astype(str).str.strip() == "")
+    s = df["native_item_id"]
+    s_str = s.astype("string").str.strip()
+    missing_tokens = {"", "nan", "none", "null", "NaN", "None", "NULL"}
+    mask_missing = s.isna() | s_str.isin(missing_tokens)
+
     if mask_missing.any():
         ns = uuid.NAMESPACE_URL
         def _derive(row):
             url = str(row.get("product_url") or "").strip()
             if url:
                 return str(uuid.uuid5(ns, url))
-            combo = (str(row.get("brand_raw") or "").strip() + "|" + str(row.get("title_raw") or "").strip())
+            combo = (str(row.get("brand_raw") or "").strip() + "|" +
+                     str(row.get("title_raw") or "").strip())
             if combo.strip("|"):
                 return str(uuid.uuid5(ns, combo))
             return str(uuid.uuid4())
@@ -472,8 +471,8 @@ def upsert_to_silver(
     df = normalize_currency(df)
     df = normalize_units(df)
     df = compute_effective_price(df)
-    df = validate_schema(df)
     df = make_silver_keys(df)
+    df = validate_schema(df)
     df = _finalize(df, retailer_id=retailer_id, source_endpoint=source_endpoint, ingest_run_id=ingest_run_id)
 
     ns = table if (table and str(table).strip()) else retailer_id
@@ -482,7 +481,7 @@ def upsert_to_silver(
     for snap_date, part in df.groupby("snapshot_date", dropna=False):
         snap = str(snap_date) if pd.notna(snap_date) else _today_iso()
         base_path     = f"{SILVER_PREFIX}/{ns}/snapshot_date={snap}"
-        run_blob      = f"{base_path}/run_{ingest_run_id}.csv"
+        run_blob      = f"{base_path}/run_{ingest_run_id}_{retailer_id}.csv"
         current_blob  = f"{base_path}/current.csv"
 
         _upload_blob_text(SILVER_CONTAINER, run_blob, part.to_csv(index=False))

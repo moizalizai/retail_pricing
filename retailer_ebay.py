@@ -16,7 +16,7 @@ COALESCE_MAP = {
     "category_raw_path": ["category_raw_path", "categoryPath", "leafCategoryName"],
 
     # refs & links
-    "product_url": ["product_url", "itemWebUrl", "viewItemURL"],
+    "product_url": ["itemWebUrl", "viewItemURL", "itemWebURL", "product_url"],
 
     # identifiers (GTINs)
     "upc": ["upc", "ean", "gtin", "productId"],

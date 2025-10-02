@@ -1,284 +1,223 @@
-import os, sys, time, uuid, pathlib, datetime as dt
-from typing import Dict, Any, List, Optional, Tuple
-from azure.storage.blob import BlobServiceClient, ContentSettings
-from io import BytesIO
-from dotenv import load_dotenv
-
+# n_ebay_pull.py
+import os, sys, time, uuid, base64, pathlib, datetime as dt
+from typing import Iterable, List, Dict
 import requests
 import pandas as pd
-
-from signer import walmart_headers  # <-- your signer
+from azure.storage.blob import BlobServiceClient
 
 # -----------------------
-# Config
+# Config / env
 # -----------------------
-BASE = "https://developer.api.walmart.com/api-proxy/service/affil/product/v2"
-DETAILS_EP = f"{BASE}/items"   # supports batching: ids=comma-separated
-BATCH_SIZE = 20                # safe batch size (tune as you like)
-RATE_SLEEP = 0.35              # seconds between calls (be gentle)
-OUT_DIR = "out/walmart/daily"
-WRITE_FORMAT = "csv"           # 'csv' or 'parquet'
+BATCH_SIZE   = int(os.getenv("EBAY_BATCH_SIZE", "20"))
+RATE_SLEEP   = float(os.getenv("EBAY_RATE_SLEEP", "0.30"))
+CONTAINER    = os.getenv("RAW_CONTAINER", "retail-data")
 SNAPSHOT_DATE = dt.date.today().isoformat()
-CONTAINER = "retail-data"
-ENABLE_SILVER = False
 
+EBAY_CLIENT_ID      = os.getenv("EBAY_CLIENT_ID")
+EBAY_CLIENT_SECRET  = os.getenv("EBAY_CLIENT_SECRET")
+EBAY_OAUTH_ENV      = (os.getenv("EBAY_OAUTH_ENV", "PRODUCTION") or "PRODUCTION").upper()  # PRODUCTION or SANDBOX
+EBAY_MARKETPLACE_ID = os.getenv("EBAY_MARKETPLACE_ID", "EBAY_US")
 
-load_dotenv()
+AZ_CONN = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
+if not AZ_CONN:
+    print("[ERROR] AZURE_STORAGE_CONNECTION_STRING is not set", file=sys.stderr)
+    sys.exit(1)
 
-_blob_service_client = None
-
-def _get_blob_client(container: str, blob_path: str):
-    global _blob_service_client
-    conn_str = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
-    if not conn_str:
-        raise RuntimeError("AZURE_STORAGE_CONNECTION_STRING not set.")
-    if _blob_service_client is None:
-        _blob_service_client = BlobServiceClient.from_connection_string(conn_str)
-    return _blob_service_client.get_blob_client(container=container, blob=blob_path)
-
-def upload_bytes(container: str, blob_path: str, data: bytes, content_type: str):
-    """Upload raw bytes directly to a blob path (folders auto-created)."""
-    bc = _get_blob_client(container, blob_path)
-    bc.upload_blob(data, overwrite=True, content_settings=ContentSettings(content_type=content_type))
-    print(f"[OK] Uploaded → {container}/{blob_path}")
+# -----------------------
+# Azure helpers
+# -----------------------
+def _blob_client():
+    return BlobServiceClient.from_connection_string(AZ_CONN)
 
 def upload_df_csv(df: pd.DataFrame, container: str, blob_path: str):
-    """Stream a DataFrame as CSV to Azure Blob (no temp file)."""
-    buf = BytesIO()
-    df.to_csv(buf, index=False)
-    upload_bytes(container, blob_path, buf.getvalue(), content_type="text/csv")
-
-def upload_df_parquet(df: pd.DataFrame, container: str, blob_path: str):
-    """Stream a DataFrame as Parquet (snappy) to Azure Blob."""
-    buf = BytesIO()
-    df.to_parquet(buf, index=False)  # requires pyarrow
-    upload_bytes(container, blob_path, buf.getvalue(), content_type="application/octet-stream")
-
+    svc = _blob_client()
+    cc = svc.get_container_client(container)
+    cc.upload_blob(name=blob_path, data=df.to_csv(index=False).encode("utf-8"), overwrite=True)
 
 # -----------------------
-# Helpers
+# eBay OAuth + endpoints
 # -----------------------
-def chunked(seq: List[str], n: int) -> List[List[str]]:
-    return [seq[i:i+n] for i in range(0, len(seq), n)]
+def _oauth_host() -> str:
+    return "api.ebay.com" if EBAY_OAUTH_ENV == "PRODUCTION" else "api.sandbox.ebay.com"
 
-def load_master(path: str = "master_skus.csv") -> pd.DataFrame:
-    if not pathlib.Path(path).exists():
-        print(f"[ERROR] {path} not found", file=sys.stderr)
+def _browse_host() -> str:
+    return "api.ebay.com" if EBAY_OAUTH_ENV == "PRODUCTION" else "api.sandbox.ebay.com"
+
+EBAY_TOKEN_URL        = f"https://{_oauth_host()}/identity/v1/oauth2/token"
+EBAY_DETAILS_PREFIX   = f"https://{_browse_host()}/buy/browse/v1/item"  # GET /{item_id}
+
+_cached_token: str | None = None
+_cached_expiry: float = 0.0
+
+def _now_utc_iso() -> str:
+    return dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+
+def _get_ebay_access_token() -> str:
+    global _cached_token, _cached_expiry
+    now = time.time()
+    if _cached_token and now < _cached_expiry - 60:
+        return _cached_token
+    if not EBAY_CLIENT_ID or not EBAY_CLIENT_SECRET:
+        print("[ERROR] EBAY_CLIENT_ID/EBAY_CLIENT_SECRET not set", file=sys.stderr)
         sys.exit(1)
-    df = pd.read_csv(path)
-    if "walmart_itemId" not in df.columns:
-        print("[ERROR] master_skus.csv must include walmart_itemId", file=sys.stderr)
+
+    basic = base64.b64encode(f"{EBAY_CLIENT_ID}:{EBAY_CLIENT_SECRET}".encode()).decode()
+    headers = {"Authorization": f"Basic {basic}", "Content-Type": "application/x-www-form-urlencoded"}
+    scopes = " ".join([
+        "https://api.ebay.com/oauth/api_scope",
+        "https://api.ebay.com/oauth/api_scope/buy.item.readonly",
+    ])
+    data = {"grant_type": "client_credentials", "scope": scopes}
+    r = requests.post(EBAY_TOKEN_URL, headers=headers, data=data, timeout=20)
+    if r.status_code != 200:
+        print(f"[ERROR] eBay token failed {r.status_code}: {r.text[:200]}", file=sys.stderr)
         sys.exit(1)
-    if "upc" not in df.columns:
-        df["upc"] = None
-    # force as text
-    df["walmart_itemId"] = df["walmart_itemId"].astype(str)
-    df["upc"] = df["upc"].astype(str).where(df["upc"].notna(), None)
-    # Deduplicate by itemId
-    df = df.drop_duplicates(subset=["walmart_itemId"]).reset_index(drop=True)
-    return df
+    tok = r.json()
+    _cached_token = tok["access_token"]
+    _cached_expiry = now + int(tok.get("expires_in", 7200))
+    return _cached_token
 
-def request_items(ids: list) -> list:
-    """Return a flat list of item dicts; splits batches if needed."""
-    if not ids:
-        return []
-    params = {"ids": ",".join(ids), "responseGroup": "full"}
-    try:
-        r = requests.get(DETAILS_EP, headers=walmart_headers(), params=params, timeout=30)
-        if r.status_code == 200:
-            payload = r.json() or {}
-            return payload.get("items", []) or payload.get("Items", []) or []
-        # If batch too large or other 4xx, split and try halves
-        if r.status_code == 400 and len(ids) > 1:
-            mid = len(ids) // 2
-            return request_items(ids[:mid]) + request_items(ids[mid:])
-        # 429/5xx: brief backoff then retry once as singles
-        if r.status_code in (429, 500, 502, 503, 504):
-            time.sleep(1.2)
-            out = []
-            for i in ids:
-                out.extend(request_items([i]))
-            return out
-        print(f"[WARN] {r.status_code} {r.url}\n{r.text[:300]}")
-        return []
-    except requests.RequestException as e:
-        print(f"[ERROR] {e}")
-        return []
-
-
-def as_float(x) -> Optional[float]:
-    try:
-        if x is None or x == "":
-            return None
-        return float(str(x).replace(",", "").strip())
-    except Exception:
-        return None
-
-def parse_item(it: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Map Affiliate v2 item to normalized fields.
-    We’re conservative: if a field isn't there, we leave None.
-    """
-    # Raw/basic
-    item_id = it.get("itemId")
-    upc = (it.get("upc") or "").strip() or None
-    name = it.get("name")
-    brand = it.get("brandName")
-    model = it.get("modelNumber") or it.get("model")
-    category_path = it.get("categoryPath")
-    url = it.get("productUrl") or it.get("productTrackingUrl") or it.get("productUrlText")
-
-    # Prices
-    price_curr = as_float(it.get("salePrice") or it.get("price"))
-    msrp = as_float(it.get("msrp"))
-    # Some categories expose strike-through/was via other nodes; if you see one, map it here:
-    price_regular_raw = msrp  # prefer msrp; adjust if you find a better "was"/"listPrice" in your payloads
-    # Promo flags (explicit)
-    rollback = bool(it.get("rollback"))
-    clearance = bool(it.get("clearance"))
-    is_on_sale = bool(it.get("isOnSale"))
-    promo_explicit = rollback or clearance or is_on_sale
-
-    # Availability
-    # Common patterns: 'stock' ("Available"/"Out of stock") or 'availableOnline' (True/False)
-    stock_str = (it.get("stock") or "").strip()
-    available_online = it.get("availableOnline")
-    if isinstance(available_online, str):
-        available_online = available_online.lower() == "true"
-    in_stock = None
-    if stock_str:
-        in_stock = stock_str.lower().startswith("avail")  # "Available"
-    elif available_online is not None:
-        in_stock = bool(available_online)
-
-    # Reviews
-    rating_avg = None
-    ra = it.get("customerRating") or it.get("averageRating")
-    if ra is not None:
-        try:
-            rating_avg = float(str(ra))
-        except Exception:
-            rating_avg = None
-    rating_count = None
-    for k in ("numReviews", "reviewCount", "customerRatingCount", "numberOfReviews"):
-        if it.get(k) is not None:
-            try:
-                rating_count = int(str(it.get(k)).replace("+", "").replace(",", ""))
-                break
-            except Exception:
-                pass
-
-    # Decide regular price + promo method + discount depth
-    reg_price, reg_src = infer_regular_price(price_curr, price_regular_raw, msrp)
-    promo_flag, promo_method, disc_depth = detect_promo(price_curr, reg_price, promo_explicit)
-
+def ebay_headers() -> dict:
     return {
-        "snapshot_date": SNAPSHOT_DATE,
-        "captured_at": dt.datetime.utcnow().isoformat(timespec="seconds") + "Z",
-        "retailer_id": "WALMART",
-        "walmart_item_id": str(item_id) if item_id is not None else None,
-        "upc": upc,
-
-        "title_raw": name,
-        "brand_raw": brand,
-        "model_raw": model,
-        "category_raw_path": category_path,
-        "product_url": url,
-        "currency": "USD",
-
-        "price_current": price_curr,
-        "price_regular": price_regular_raw,
-        "msrp": msrp,
-        "price_regular_chosen": reg_price,
-        "regular_price_source": reg_src,
-
-        "promo_flag": promo_flag,
-        "promo_detect_method": promo_method,   # explicit | heuristic_regular | none
-        "discount_depth": disc_depth,
-
-        "in_stock_flag": in_stock,
-        "availability_message": stock_str or ( "Available Online" if in_stock else ("Out of Stock" if in_stock is False else None) ),
-        "shipping_cost": None,  # Affiliate v2 usually doesn't return it; leave None
-
-        "rating_avg": rating_avg,
-        "rating_count": rating_count,
-
-        "source_endpoint": "items:responseGroup=full"
+        "Authorization": f"Bearer {_get_ebay_access_token()}",
+        "Content-Type": "application/json",
+        "X-EBAY-C-MARKETPLACE-ID": EBAY_MARKETPLACE_ID,
     }
 
-def infer_regular_price(current: Optional[float], explicit_regular: Optional[float], msrp: Optional[float]) -> Tuple[Optional[float], str]:
-    if explicit_regular is not None:
-        return explicit_regular, "explicit_regular_or_msrp"
-    if msrp is not None:
-        return msrp, "msrp"
-    return None, "unknown"
+# -----------------------
+# Load seed IDs (from your mapping)
+# -----------------------
+def load_ebay_matches(path: str = "ebay_matches.csv") -> pd.DataFrame:
+    p = pathlib.Path(path)
+    if not p.exists():
+        print(f"[ERROR] {path} not found", file=sys.stderr)
+        sys.exit(1)
+    df = pd.read_csv(p)
+    if "ebay_item_id" not in df.columns and "itemId" not in df.columns:
+        print("[ERROR] ebay_matches.csv needs ebay_item_id or itemId column", file=sys.stderr)
+        sys.exit(1)
+    if "ebay_item_id" not in df.columns and "itemId" in df.columns:
+        df = df.rename(columns={"itemId": "ebay_item_id"})
+    df["ebay_item_id"] = df["ebay_item_id"].astype(str)
+    df = df.drop_duplicates(subset=["ebay_item_id"]).reset_index(drop=True)
+    return df
 
-def detect_promo(current: Optional[float], regular: Optional[float], explicit_flag: bool) -> Tuple[bool, str, Optional[float]]:
-    if explicit_flag and (regular and current):
-        return True, "explicit", (regular - current) / regular if regular > 0 else None
-    if (regular and current) and regular > 0 and current < 0.95 * regular:
-        return True, "heuristic_regular", (regular - current) / regular
-    return False, "none", None
+# -----------------------
+# Call eBay API
+# -----------------------
+def request_items_by_id(ids: Iterable[str]) -> List[Dict]:
+    out: List[Dict] = []
+    hdrs = ebay_headers()
+    for item_id in ids:
+        url = f"{EBAY_DETAILS_PREFIX}/{item_id}"
+        try:
+            resp = requests.get(url, headers=hdrs, timeout=20)
+            if resp.status_code == 200:
+                out.append(resp.json())
+            elif resp.status_code in (429, 500, 502, 503, 504):
+                time.sleep(1.0)
+                resp2 = requests.get(url, headers=hdrs, timeout=20)
+                if resp2.status_code == 200:
+                    out.append(resp2.json())
+            elif resp.status_code != 404:
+                print(f"[WARN] eBay {resp.status_code} for {item_id}: {resp.text[:160]}", file=sys.stderr)
+        except requests.RequestException as e:
+            print(f"[ERROR] eBay request error for {item_id}: {e}", file=sys.stderr)
+        time.sleep(RATE_SLEEP)
+    return out
 
-def write_snapshot_ebay(df: pd.DataFrame):
-    run_id = str(uuid.uuid4())[:8]
-    snapshot_date = dt.date.today().isoformat()
-    blob_path = f"raw/ebay/daily/{snapshot_date}/run_id={run_id}/ebay_snapshot_{snapshot_date}_{run_id}.csv"
+# -----------------------
+# Parse eBay item (fields your normalizer will coalesce)
+# -----------------------
+def _g(d: dict, *path):
+    cur = d
+    for p in path:
+        if not isinstance(cur, dict) or p not in cur:
+            return None
+        cur = cur[p]
+    return cur
+
+def parse_ebay_item(it: dict) -> dict:
+    ebay_id  = it.get("itemId") or it.get("legacyItemId")
+    url      = it.get("itemWebUrl") or it.get("viewItemURL") or it.get("itemWebURL")
+    cur_val  = _g(it, "price", "value") or _g(it, "currentPrice", "value") or it.get("currentPrice")
+    cur_ccy  = _g(it, "price", "currency") or _g(it, "currentPrice", "currency") or it.get("currency")
+    orig_val = _g(it, "marketingPrice", "originalPrice", "value") or it.get("originalPrice")
+    ship     = None
+    opts = it.get("shippingOptions") or []
+    if isinstance(opts, list) and opts:
+        ship = _g(opts[0], "shippingCost", "value") or opts[0].get("shippingServiceCost")
+
+    return {
+        "ebay_item_id": ebay_id,
+        "itemId": ebay_id,
+        "itemWebUrl": url,
+        "viewItemURL": url,
+        "title": it.get("title") or it.get("shortDescription"),
+        "brand": it.get("brand") or it.get("itemBrand"),
+        "mpn": it.get("mpn") or it.get("model"),
+        "currentPrice": cur_val,
+        "price": cur_val,
+        "originalPrice": orig_val,
+        "currency": cur_ccy,
+        "shippingServiceCost": ship,
+        "availabilityStatus": it.get("availabilityStatus"),
+        "upc": it.get("upc") or it.get("gtin"),
+        "ean": it.get("ean"),
+        "gtin": it.get("gtin"),
+    }
+
+# -----------------------
+# Write RAW snapshot
+# -----------------------
+def write_snapshot_ebay(df: pd.DataFrame, ingest_run_id: str | None = None) -> str:
+    if df is None or df.empty:
+        raise ValueError("write_snapshot_ebay: received empty dataframe")
+
+    run_id = ingest_run_id or os.getenv("INGEST_RUN_ID") or os.getenv("GITHUB_RUN_ID") or uuid.uuid4().hex[:8]
+
+    df = df.copy()
+    df["snapshot_date"] = SNAPSHOT_DATE
+    df["captured_at"]   = _now_utc_iso()
+    df["retailer_id"]   = "ebay"  # critical
+
+    if "ebay_item_id" not in df.columns and "itemId" in df.columns:
+        df.rename(columns={"itemId": "ebay_item_id"}, inplace=True)
+
+    blob_path = f"raw/ebay/daily/{SNAPSHOT_DATE}/run_id={run_id}/ebay_snapshot_{SNAPSHOT_DATE}_{run_id}.csv"
     upload_df_csv(df=df, container=CONTAINER, blob_path=blob_path)
     print(f"[OK] Uploaded RAW eBay → {blob_path}")
+    return blob_path
 
-    # SILVER Parquet (optional)
-    if ENABLE_SILVER:
-        try:
-            silver_blob = f"silver/daily_prices/{date_str}/part-0001.parquet"
-            upload_df_parquet(df=df, container=CONTAINER, blob_path=silver_blob)
-            print(f"[OK] Uploaded Silver → {CONTAINER}/{silver_blob}")
-        except Exception as e:
-            print(f"[WARN] Silver parquet upload failed (install pyarrow?): {e}")
+# -----------------------
+# Main
+# -----------------------
+def chunked(seq, n):
+    for i in range(0, len(seq), n):
+        yield seq[i:i+n]
 
 def main():
-    master = load_master("master_skus.csv")
-    item_ids = master["walmart_itemId"].dropna().astype(str).tolist()
-    if not item_ids:
-        print("[WARN] No walmart_itemId values found in master_skus.csv", file=sys.stderr)
+    matches = load_ebay_matches("ebay_matches.csv")
+    ids = matches["ebay_item_id"].dropna().astype(str).unique().tolist()
+    if not ids:
+        print("[WARN] No eBay item IDs found in ebay_matches.csv", file=sys.stderr)
         sys.exit(0)
 
-    # IMPORTANT: define this before the loop and inside main()
-    all_rows = []
-
-    # harvest in batches of 20
-    for chunk in chunked(item_ids, BATCH_SIZE):   # BATCH_SIZE should be 20
-        items = request_items(chunk)              # returns List[Dict[str, Any]]
+    rows: List[Dict] = []
+    for part in chunked(ids, BATCH_SIZE):
+        items = request_items_by_id(part)
         for it in items:
             try:
-                row = parse_item(it)
-                all_rows.append(row)
+                rows.append(parse_ebay_item(it))
             except Exception as e:
-                print(f"[WARN] parse error for item {it.get('itemId')}: {e}", file=sys.stderr)
-        time.sleep(RATE_SLEEP)                    # e.g., 0.35s
+                print(f"[WARN] parse error: {e}", file=sys.stderr)
 
-    if not all_rows:
-        print("[WARN] No rows parsed; check API response & auth", file=sys.stderr)
+    if not rows:
+        print("[WARN] No rows parsed from eBay; check credentials/env/endpoints", file=sys.stderr)
         sys.exit(0)
 
-    df = pd.DataFrame(all_rows)
-
-    # Ensure consistent column order (Silver-aligned)
-    cols = [
-        "snapshot_date","captured_at","retailer_id","walmart_item_id","upc",
-        "title_raw","brand_raw","model_raw","category_raw_path","product_url","currency",
-        "price_current","price_regular","msrp","price_regular_chosen","regular_price_source",
-        "promo_flag","promo_detect_method","discount_depth",
-        "in_stock_flag","availability_message","shipping_cost",
-        "rating_avg","rating_count","source_endpoint"
-    ]
-    for c in cols:
-        if c not in df.columns:
-            df[c] = None
-    df = df[cols]
-
+    df = pd.DataFrame(rows)
     write_snapshot_ebay(df)
-
 
 if __name__ == "__main__":
     main()
