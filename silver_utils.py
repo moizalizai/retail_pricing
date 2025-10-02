@@ -180,16 +180,17 @@ def _landed(price_current: Optional[float], shipping_cost: Optional[float]) -> O
 # Column coalescing
 # ----------------
 def coalesce_cols(df: pd.DataFrame, cols: list, dtype: str = "string") -> pd.Series:
-    """
-    First-non-null across given columns.
-    Keeps only existing columns; if none exist, returns NA series of correct length.
-    """
     use = [c for c in cols if c in df.columns]
     if not use:
         return pd.Series(pd.NA, index=df.index, dtype=dtype)
-    out = df[use].bfill(axis=1).iloc[:, 0]
+
+    tmp = df[use].bfill(axis=1)
+    tmp = tmp.infer_objects(copy=False)   # ← addresses the FutureWarning
+    out = tmp.iloc[:, 0]
+
     out = out.replace(r"^\s*$", pd.NA, regex=True).astype(dtype)
     return out
+
 
 # ----------------
 # Normalization & schema
