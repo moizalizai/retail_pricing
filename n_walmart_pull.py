@@ -221,12 +221,36 @@ def detect_promo(current: Optional[float], regular: Optional[float], explicit_fl
 
 import uuid, datetime as dt
 
-def write_snapshot(df: pd.DataFrame):
-    run_id = str(uuid.uuid4())[:8]
-    snapshot_date = dt.date.today().isoformat()
-    blob_path = f"raw/walmart/daily/{snapshot_date}/run_id={run_id}/walmart_snapshot_{snapshot_date}_{run_id}.csv"
-    upload_df_csv(df=df, container=CONTAINER, blob_path=blob_path)
-    print(f"[OK] Uploaded RAW Walmart → {blob_path}")
+def _now_utc_iso():
+    return dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+
+def write_snapshot_walmart(df: pd.DataFrame, ingest_run_id: str | None = None) -> str:
+    if df is None or df.empty:
+        raise ValueError("write_snapshot_walmart: empty df")
+    run_id = ingest_run_id or os.getenv("INGEST_RUN_ID") or os.getenv("GITHUB_RUN_ID") or uuid.uuid4().hex[:8]
+    df = df.copy()
+    df["snapshot_date"] = SNAPSHOT_DATE
+    df["captured_at"]   = _now_utc_iso()
+    df["retailer_id"]   = "walmart"
+    if "walmart_item_id" not in df.columns and "itemId" in df.columns:
+        df.rename(columns={"itemId": "walmart_item_id"}, inplace=True)
+    blob = f"raw/walmart/daily/{SNAPSHOT_DATE}/run_id={run_id}/walmart_snapshot_{SNAPSHOT_DATE}_{run_id}.csv"
+    upload_df_csv(df=df, container=CONTAINER, blob_path=blob)  # uses your existing helper
+    print(f"[OK] Uploaded RAW Walmart → {blob}")
+    return blob
+
+def run_pull_and_write_raw(ingest_run_id: str | None = None) -> str:
+    master = load_master("master_skus.csv")                     # your existing function
+    ids = master["walmart_itemId"].dropna().astype(str).tolist()
+    rows = []
+    for chunk in chunked(ids, 20):
+        items = request_items(chunk)                            # your existing Walmart API call
+        for it in items:
+            rows.append(parse_item(it))                         # your existing parser
+    if not rows:
+        raise RuntimeError("Walmart: no rows parsed")
+    df = pd.DataFrame(rows)
+    return write_snapshot_walmart(df, ingest_run_id=ingest_run_id)
 
 
     # Upload SILVER Parquet (optional, standardized schema)

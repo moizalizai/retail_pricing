@@ -20,14 +20,14 @@ import n_ebay_pull      # your existing pull script module
 from retailer_walmart import normalize_walmart
 from retailer_ebay import normalize_ebay
 from silver_utils import (
-    read_raw_latest,     # implement: read latest Walmart/eBay raw snapshot from Azure
+    read_raw_latest,
+    make_silver_keys,     # implement: read latest Walmart/eBay raw snapshot from Azure
     validate_schema,
     normalize_currency,  # shared canonical rules if you use them
     normalize_units,
     standardize_brand_title,
     map_categories,
     compute_effective_price,
-    make_silver_keys,
     upsert_to_silver,
 )
 
@@ -48,29 +48,29 @@ def to_silver(df_pre: pd.DataFrame | None) -> pd.DataFrame:
     return df
 
 def main():
-    run_id = os.getenv("GITHUB_RUN_ID", str(uuid.uuid4()))
+    run_id = make_ingest_run_id()
 
-    # 1) Read latest raw
+    # 1) WRITE RAW
+    wm_blob = wm.run_pull_and_write_raw(run_id)   # ✅ Walmart RAW
+    eb_blob = eb.run_pull_and_write_raw(run_id)   # ✅ eBay RAW
+    print("RAW blobs:", wm_blob, eb_blob)
+
+    # 2) READ RAW BACK
     df_wm_raw = read_raw_latest("walmart")
     df_eb_raw = read_raw_latest("ebay")
+    print("RAW shapes:", df_wm_raw.shape, df_eb_raw.shape)
 
-    # 2) Map raw → pre-silver (per retailer)
-    df_wm_pre = normalize_walmart(df_wm_raw)   # must return a DataFrame (even if empty)
+    # 3) PRE-SILVER
+    df_wm_pre = normalize_walmart(df_wm_raw)
     df_eb_pre = normalize_ebay(df_eb_raw)
 
-    # 3) Silver transform (optional if you let upsert_to_silver do it)
-    df_wm_silver = to_silver(df_wm_pre)
-    df_eb_silver = to_silver(df_eb_pre)
-
-    # 4) Write silver (per retailer so retailer_id is set correctly in _finalize)
-    upsert_to_silver(
-        df_wm_silver, retailer_id="walmart", source_endpoint="pull", ingest_run_id=run_id,
-        table="products_v1", key_cols=("retailer_id","native_item_id")
-    )
-    upsert_to_silver(
-        df_eb_silver, retailer_id="ebay", source_endpoint="pull", ingest_run_id=run_id,
-        table="products_v1", key_cols=("retailer_id","native_item_id")
-    )
+    # 4) SILVER
+    upsert_to_silver(df_wm_pre, retailer_id="walmart", source_endpoint="pull",
+                     ingest_run_id=run_id, table="products_v1",
+                     key_cols=("retailer_id","native_item_id"))
+    upsert_to_silver(df_eb_pre, retailer_id="ebay", source_endpoint="pull",
+                     ingest_run_id=run_id, table="products_v1",
+                     key_cols=("retailer_id","native_item_id"))
 
 if __name__ == "__main__":
     main()

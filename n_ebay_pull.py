@@ -189,6 +189,37 @@ def write_snapshot_ebay(df: pd.DataFrame, ingest_run_id: str | None = None) -> s
     print(f"[OK] Uploaded RAW eBay → {blob_path}")
     return blob_path
 
+def run_pull_and_write_raw(ingest_run_id: str | None = None) -> str:
+    """
+    Pull eBay details for the IDs in ebay_matches.csv and write a RAW snapshot.
+    Returns the blob path that was written.
+    """
+    # 1) Load seed IDs from your mapping (NOT master_skus)
+    matches = load_ebay_matches("ebay_matches.csv")  # uses ebay_item_id / itemId
+    ids = matches["ebay_item_id"].dropna().astype(str).unique().tolist()
+    if not ids:
+        raise RuntimeError("eBay: no ebay_item_id values found in ebay_matches.csv")
+
+    # 2) Call eBay Browse details API in chunks
+    rows = []
+    for chunk in chunked(ids, BATCH_SIZE):           # BATCH_SIZE already defined (e.g., 20)
+        items = request_items_by_id(chunk)           # your eBay GET /buy/browse/v1/item/{id}
+        for it in items:
+            try:
+                rows.append(parse_ebay_item(it))     # normalize raw fields for RAW
+            except Exception as e:
+                print(f"[WARN] parse error: {e}", file=sys.stderr)
+
+        time.sleep(RATE_SLEEP)                       # be polite to the API
+
+    if not rows:
+        raise RuntimeError("eBay: no rows parsed from API; check creds/env/endpoints")
+
+    # 3) Stamp & WRITE RAW to Azure (retailer_id='ebay') and return the blob path
+    df = pd.DataFrame(rows)
+    return write_snapshot_ebay(df, ingest_run_id=ingest_run_id)
+
+
 # -----------------------
 # Main
 # -----------------------
