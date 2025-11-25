@@ -55,8 +55,17 @@ def load_all_runs() -> pd.DataFrame:
             df["captured_at"] = pd.to_datetime(df["captured_at"], errors="coerce", utc=True)
         if "snapshot_date" in df.columns:
             df["snapshot_date"] = pd.to_datetime(df["snapshot_date"], errors="coerce").dt.date
+        df = _normalize_id_columns(df)   # <-- add this line
         dfs.append(df)
     return pd.concat(dfs, ignore_index=True)
+
+def _normalize_id_columns(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    for col in ["retailer_id", "native_item_id", "upc"]:
+        if col in df.columns:
+            df[col] = df[col].astype("string")  # pandas string dtype
+    return df
+
 
 def latest_per_sku(df: pd.DataFrame) -> pd.DataFrame:
     need = {"retailer_id", "native_item_id", "captured_at"}
