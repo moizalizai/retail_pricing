@@ -68,3 +68,7 @@ jobs:
         run: |
           python etl_script.py
 
+      - name: Build Gold layer
+        run: |
+          python gold_builder.py
+
