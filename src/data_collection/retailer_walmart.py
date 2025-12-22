@@ -1,6 +1,6 @@
 # retailer_walmart.py
 import pandas as pd
-from silver_utils import SILVER_COLS, _to_float, _to_int, _choose_regular, _promo_and_depth, _landed
+from src.pipeline.silver_utils import SILVER_COLS, _to_float, _to_int, _choose_regular, _promo_and_depth, _landed
 
 # Raw Walmart → silver column names (first non-null wins)
 COALESCE_MAP = {

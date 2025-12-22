@@ -32,3 +32,10 @@ silver/
 config.json
 
 ##added these files
+
+## No need in the repo
+__pycache__/
+
+*.pyc
+
+.github/
